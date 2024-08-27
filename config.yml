@@ -1,0 +1,14 @@
+app:
+  distributed_storage_servers: 2
+logger:
+  level: 6
+  output: stdout
+metadb:
+  host: metadb
+  port: 5432
+  db: db
+  user: root
+server:
+  port: 8080
+  max_file_size_in_bytes: 10_000_000_000
+  max_memory_upload_file_in_bytes: 100_000_000

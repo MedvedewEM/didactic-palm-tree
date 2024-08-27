@@ -1,0 +1,1 @@
+INSERT INTO servers (id, host) VALUES (1, 'storage1:8081'), (2, 'storage2:8081'), (3, 'storage3:8081'), (4, 'storage4:8081'), (5, 'storage5:8081'), (6, 'storage6:8081'), (7, 'storage7:8081'), (8, 'storage8:8081');
