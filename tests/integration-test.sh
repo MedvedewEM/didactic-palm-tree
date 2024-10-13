@@ -8,13 +8,13 @@ JITTER=${RANDOM}_
 generate_test_files() {
     touch ${JITTER}0B.bin
     echo "a" > ${JITTER}2B.bin
-    dd if=/dev/urandom of=${JITTER}10MB.bin bs=10M count=1
-    dd if=/dev/urandom of=${JITTER}15MB.bin bs=15M count=1
-    dd if=/dev/urandom of=${JITTER}50MB.bin bs=10M count=5
-    dd if=/dev/urandom of=${JITTER}100MB.bin bs=100M count=1
-    dd if=/dev/urandom of=${JITTER}300MB.bin bs=100M count=3
-    dd if=/dev/urandom of=${JITTER}600MB.bin bs=100M count=6
-    dd if=/dev/urandom of=${JITTER}1200MB.bin bs=100M count=12
+    dd if=/dev/urandom of=${JITTER}10MB.bin bs=10000000 count=1
+    dd if=/dev/urandom of=${JITTER}15MB.bin bs=15000000 count=1
+    dd if=/dev/urandom of=${JITTER}50MB.bin bs=10000000 count=5
+    dd if=/dev/urandom of=${JITTER}100MB.bin bs=100000000 count=1
+    dd if=/dev/urandom of=${JITTER}300MB.bin bs=100000000 count=3
+    dd if=/dev/urandom of=${JITTER}600MB.bin bs=100000000 count=6
+    dd if=/dev/urandom of=${JITTER}1200MB.bin bs=100000000 count=12
 }
 
 equal() {
@@ -27,7 +27,8 @@ equal() {
 }
 
 upload() {
-    echo $(curl -s -F input=@$1 "localhost:8080/upload")
+    size=$(stat -f %z $1)
+    echo $(curl -s -F metadata="{\"file_name\": \"$1\", \"file_size\": $size}" -F input=@$1 "localhost:8080/upload")
 }
 
 download() {

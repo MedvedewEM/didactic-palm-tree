@@ -8,19 +8,25 @@ import (
 	"github.com/MedvedewEM/didactic-palm-tree/internal/loader"
 	"github.com/MedvedewEM/didactic-palm-tree/internal/metadb"
 	"github.com/MedvedewEM/didactic-palm-tree/internal/metadb/models"
+	"github.com/MedvedewEM/didactic-palm-tree/internal/orphaner"
 	picker "github.com/MedvedewEM/didactic-palm-tree/internal/serverspicker"
-	"github.com/MedvedewEM/didactic-palm-tree/internal/utils"
+	ctxio "github.com/MedvedewEM/didactic-palm-tree/pkg/ctxreader"
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/xerrors"
 )
 
+type FileMetadata struct {
+	Name string `json:"file_name"`
+	Size int64 `json:"file_size"`
+}
+
 type App struct {
 	lg *logrus.Logger
 	mdb metadb.MetaDB
-
 	picker picker.Picker
 	loader loader.Loader
+	orphaner chan<-orphaner.Task
 }
 
 func NewApp(
@@ -28,18 +34,19 @@ func NewApp(
 	mdb metadb.MetaDB,
 	picker picker.Picker,
 	loader loader.Loader,
+	orphaner chan<-orphaner.Task,
 ) *App {
 	return &App{
-		lg: lg,
+		lg: lg.WithField("service", "app").Logger,
 		mdb: mdb,
 		picker: picker,
 		loader: loader,
+		orphaner: orphaner,
 	}
 }
 
-func (a *App) Upload(filename string, file multipart.File) (uuid.UUID, error) {
+func (a *App) Upload(ctx context.Context, file FileMetadata, part *multipart.Part) (uuid.UUID, error) {
 	id := uuid.New()
-	ctx := context.Background()
 	lg := a.lg.WithField("uuid", id.String())
 
 	lg.Debugf("picking servers")
@@ -47,27 +54,34 @@ func (a *App) Upload(filename string, file multipart.File) (uuid.UUID, error) {
 	if err != nil {
 		return uuid.UUID{}, xerrors.Errorf("pick servers: %w", err)
 	}
-	pickedServerIDs := models.ServerToServerIDs(pickedServers)
-	lg.Debugf("picked servers id: %v", pickedServerIDs)
+	lg.Debugf("picked servers id: %v", models.ServersToServerIDs(pickedServers))
 
-	fileParts, err := utils.SplitByNReaders(file, int64(len(pickedServers)))
+	var isOrphaned bool
+	defer func() {
+		if !isOrphaned {
+			return
+		}
+
+		orphanedHosts := models.ServersToHosts(pickedServers)
+		if len(orphanedHosts) == 0 {
+			lg.Debugf("nothing to orphane")
+			return
+		}
+
+		lg.Debugf("orphaning file in servers: %v", orphanedHosts)
+		a.orphaner <- orphaner.Task{ID: id, Hosts: orphanedHosts}
+	}()
+
+	uploadedMetadata, err := a.loader.Upload(ctx, id, pickedServers, file.Size, part)
 	if err != nil {
-		return uuid.UUID{}, xerrors.Errorf("split readers: %w", err)
-	}
-	lg.Debugf("splitted by %v readers", len(fileParts))
-
-	pickedServers = pickedServers[:len(fileParts)]
-	pickedServerIDs = pickedServerIDs[:len(fileParts)]
-	lg.Debugf("picked servers id after spliting file: %v", pickedServerIDs)
-
-	uploadedPartSizes, err := a.loader.UploadFileParts(ctx, id, fileParts, pickedServers)
-	if err != nil {
+		isOrphaned = true
 		return uuid.UUID{}, xerrors.Errorf("upload file parts: %w", err)
 	}
-	lg.Debugf("file parts uploaded, sizes: %v", uploadedPartSizes)
+	lg.Debugf("uploaded file parts, sizes: %v", uploadedMetadata)
 
 	tx, err := a.mdb.Begin(ctx)
 	if err != nil {
+		isOrphaned = true
 		return uuid.UUID{}, xerrors.Errorf("begin: %w", err)
 	}
 	defer func() {
@@ -82,11 +96,13 @@ func (a *App) Upload(filename string, file multipart.File) (uuid.UUID, error) {
 		}
 	}()
 
-	if err = a.mdb.CreateFile(ctx, tx, id, filename); err != nil {
+	if err = a.mdb.CreateFile(ctx, tx, id, file.Name); err != nil {
+		isOrphaned = true
 		return uuid.UUID{}, xerrors.Errorf("create file: %w", err)
 	}
 
-	if err = a.mdb.CreateFileParts(ctx, tx, id, pickedServerIDs, uploadedPartSizes); err != nil {
+	if err = a.mdb.CreateFileParts(ctx, tx, id, loader.ToPartSizes(uploadedMetadata.FileSizes)); err != nil {
+		isOrphaned = true
 		return uuid.UUID{}, xerrors.Errorf("create file parts: %w", err)
 	}
 	lg.Debugf("added file parts to MetaDB")
@@ -94,30 +110,28 @@ func (a *App) Upload(filename string, file multipart.File) (uuid.UUID, error) {
 	return id, nil
 }
 
-func (a *App) Download(id uuid.UUID, w io.Writer) (error) {
-	ctx := context.Background()
+func (a *App) Download(ctx context.Context, id uuid.UUID, w io.Writer) (error) {
 	lg := a.lg.WithField("uuid", id.String())
 
 	servers, err := a.mdb.ListFileServers(ctx, nil, id)
 	if err != nil {
 		return xerrors.Errorf("list file servers: %w", err)
 	}
-	lg.Debugf("file located on %v servers", len(servers))
+	lg.Debugf("file located on %v servers: %v", len(servers),  models.FilePartServersToServerIDs(servers))
 
-	fileParts, err := a.loader.DownloadFileParts(ctx, id, servers)
-	for _, fp := range fileParts {
-		defer fp.Close()
-	}
+	fileParts, err := a.loader.Download(ctx, id, servers)
 	if err != nil {
 		return xerrors.Errorf("download file parts: %w", err)
 	}
-	lg.Debugf("file parts downloaded")
+	lg.Debugf("downloaded file parts")
 
 	for i, filePart := range fileParts {
-		n, err := io.Copy(w, filePart)
+		ctxFilePart := ctxio.NewReader(ctx, filePart)
+		n, err := io.Copy(w, ctxFilePart)
 		if err != nil {
 			return xerrors.Errorf("write file parts: %w", err)
 		}
+		defer filePart.Close()
 
 		lg.Debugf("file part %v written, len: %v", i, n)
 	}

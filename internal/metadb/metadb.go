@@ -17,7 +17,12 @@ type MetaDB interface {
 
 	ListServers(ctx context.Context, tx Tx) ([]models.Server, error)
 	CreateFile(ctx context.Context, tx Tx, id uuid.UUID, filename string) error
-	CreateFileParts(ctx context.Context, tx Tx, id uuid.UUID, serverIDs []int, partSizes map[int]int64) error
+	CreateFileParts(ctx context.Context, tx Tx, id uuid.UUID, partSizes map[PartSizeKey]int64) error
 	ListFileServers(ctx context.Context, tx Tx, id uuid.UUID) ([]models.FilePartServer, error)
 	GetFilePartsSize(ctx context.Context, tx Tx, serverIDs []int) (map[int]int64, error)
+}
+
+type PartSizeKey struct {
+	ServerID int
+	Order int
 }

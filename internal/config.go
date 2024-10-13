@@ -11,6 +11,7 @@ type Config struct {
 	Logger *LoggerConfig `yaml:"logger"`
 	MetaDB *metadb.MetaDBConfig `yaml:"metadb"`
 	Server *ServerConfig `yaml:"server"`
+	Loader *LoaderConfig `yaml:"loader"`
 }
 
 func NewDefaultConfig() Config {
@@ -19,6 +20,7 @@ func NewDefaultConfig() Config {
 		Logger: NewDefaultLoggerConfig(),
 		MetaDB: metadb.NewDefaultMetaDBConfig(),
 		Server: NewDefaultServerConfig(),
+		Loader: NewDefaultLoaderConfig(),
 	}
 }
 
@@ -35,6 +37,14 @@ func MergeConfigSections(cfg Config, newCfg Config) Config {
 
 	if newCfg.MetaDB != nil {
 		oCfg.MetaDB = newCfg.MetaDB
+	}
+
+	if newCfg.Server != nil {
+		oCfg.Server = newCfg.Server
+	}
+
+	if newCfg.Loader != nil {
+		oCfg.Loader = newCfg.Loader
 	}
 
 	return oCfg
@@ -88,14 +98,26 @@ func NewDefaultLoggerConfig() *LoggerConfig {
 
 type ServerConfig struct {
 	Port int `yaml:"port"`
-	MaxFileSizeInBytes int64 `yaml:"max_file_size_in_bytes"`
-	MaxMemoryUploadFileInBytes int64 `yaml:"max_memory_upload_file_in_bytes"`
+	UploadMaxFileSizeInBytes int64 `yaml:"upload_max_file_size_in_bytes"`
+	UploadMaxMetadataInBytes int64 `yaml:"upload_max_metadata_in_bytes"`
 }
 
 func NewDefaultServerConfig() *ServerConfig {
 	return &ServerConfig{
 		Port: 8080,
-		MaxFileSizeInBytes: int64(10 * units.GB),
-		MaxMemoryUploadFileInBytes: int64(100 * units.MB),
+		UploadMaxFileSizeInBytes: int64(10 * units.GB),
+		UploadMaxMetadataInBytes: int64(1 * units.KB),
+	}
+}
+
+type LoaderConfig struct {
+	UploadFileMaxBufferInBytes int64 `yaml:"upload_file_max_buffer_in_bytes"`
+	UploadLargeFileMaxBufferInBytes int64 `yaml:"upload_large_file_max_buffer_in_bytes"`
+}
+
+func NewDefaultLoaderConfig() *LoaderConfig {
+	return &LoaderConfig{
+		UploadFileMaxBufferInBytes: int64(10 * units.KB),
+		UploadLargeFileMaxBufferInBytes: int64(10 * units.MB),
 	}
 }

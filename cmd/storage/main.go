@@ -14,43 +14,43 @@ import (
 	"golang.org/x/xerrors"
 )
 
+var defaultLogger = newLog()
 var fileStorage = storageProv.NewDisk()
 
-func handleRead(lg *logrus.Entry, conn net.Conn, id uuid.UUID) error {
+func handleRead(lg *logrus.Logger, conn net.Conn, id uuid.UUID) error {
 	defer func() {
 		conn.Close()
-		lg.Println("connection closed")
+		lg.Debugln("connection closed")
 	}()
 
-	lg.Debugf("reading from file storage")
+	lg.Debugln("reading from file storage")
 	f, err := fileStorage.Read(id)
 	if err != nil {
 		return xerrors.Errorf("can not read data: %w", err)
 	}
 	defer f.Close()
 
-	lg.Debugf("coping to connection")
+	lg.Debugln("coping to connection")
 	n, err := io.Copy(conn, f)
 	if err != nil {
 		return xerrors.Errorf("can not write data: %w", err)
 	}
 
-	lg.Printf("copied, bytes len: %v", n)
+	lg.Debugf("copied, bytes len: %v", n)
 
 	return nil
 }
 
-func handleAppend(lg *logrus.Entry, conn net.Conn, id uuid.UUID) error {
+func handleAppend(lg *logrus.Logger, conn net.Conn, id uuid.UUID) error {
 	defer func() {
 		conn.Close()
-		lg.Println("connection closed")
+		lg.Debugln("connection closed")
 	}()
 
-	buf := make([]byte, 100 * units.MB)
+	buf := make([]byte, 10 * units.MB)
 	for {
 		n, err := conn.Read(buf)
 		if n > 0 {
-			lg.Printf("reading buffer, bytes len: %v", n)
 			fileStorage.Append(id, buf[:n])
 		}
 		if err != nil {
@@ -64,9 +64,20 @@ func handleAppend(lg *logrus.Entry, conn net.Conn, id uuid.UUID) error {
 	return nil
 }
 
-func handle(conn net.Conn) error {
-	defaultLogger := newLog()
+func handleDelete(lg *logrus.Logger, conn net.Conn, id uuid.UUID) error {
+	defer func() {
+		conn.Close()
+		lg.Debugln("connection closed")
+	}()
 
+	err := fileStorage.Delete(id)
+
+	lg.Debugf("file deleted: %v", id.String())
+
+	return err
+}
+
+func handle(conn net.Conn) error {
 	actionBuf := make([]byte, storage.ActionSizeInBytes)
 	if _, err := conn.Read(actionBuf); err != nil {
 		return xerrors.Errorf("read action: %w", err)
@@ -82,13 +93,15 @@ func handle(conn net.Conn) error {
 		xerrors.Errorf("parse uuid: %w", err)
 	}
 
-	lg := defaultLogger.WithFields(logrus.Fields{"action": action, "uuid": uuid.String()})
+	lg := defaultLogger.WithFields(logrus.Fields{"action": action, "uuid": uuid.String()}).Logger
 
 	switch action {
 	case storage.ReadAction:
 		return handleRead(lg, conn, uuid)
 	case storage.AppendAction:
 		return handleAppend(lg, conn, uuid)
+	case storage.DeleteAction:
+		return handleDelete(lg, conn, uuid)
 	default:
 		return xerrors.Errorf("unknown action: %v", string(actionBuf))
 	}
@@ -107,7 +120,7 @@ func main() {
 	for {
 		conn, err := server.Accept()
 		if err != nil {
-			log.Println("accept: %w", err)
+			defaultLogger.Errorf("accept: %v", err)
 			return
 		}
 
@@ -116,7 +129,7 @@ func main() {
 		go func() {
 			log.Println("connection run")
 			if err := handle(conn); err != nil {
-				log.Fatal(err)
+				defaultLogger.Errorf("handle: %v", err)
 			}
 		}()
 	}

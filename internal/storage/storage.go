@@ -16,9 +16,11 @@ type Action string
 const (
 	AppendAction Action = "APND"
 	ReadAction Action = "READ"
+	DeleteAction Action = "DLTE"
 )
 
 type Storage interface {
 	Append(id uuid.UUID, data []byte) error
 	Read(id uuid.UUID) (io.ReadCloser, error)
+	Delete(id uuid.UUID) error
 }

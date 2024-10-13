@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -10,11 +11,17 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/MedvedewEM/didactic-palm-tree/internal"
-	loader "github.com/MedvedewEM/didactic-palm-tree/internal/loader/provider"
-	pg "github.com/MedvedewEM/didactic-palm-tree/internal/metadb/provider"
-	picker "github.com/MedvedewEM/didactic-palm-tree/internal/serverspicker/provider"
+	loaderProv "github.com/MedvedewEM/didactic-palm-tree/internal/loader/provider"
+	pgProv "github.com/MedvedewEM/didactic-palm-tree/internal/metadb/provider"
+	"github.com/MedvedewEM/didactic-palm-tree/internal/orphaner"
+	orphanerProv "github.com/MedvedewEM/didactic-palm-tree/internal/orphaner/provider"
+	pickerProv "github.com/MedvedewEM/didactic-palm-tree/internal/serverspicker/provider"
+	"github.com/MedvedewEM/didactic-palm-tree/internal/worker"
+	workerProv "github.com/MedvedewEM/didactic-palm-tree/internal/worker/provider"
+	"github.com/MedvedewEM/didactic-palm-tree/pkg/storage"
 	"github.com/google/uuid"
 	"github.com/ilyakaznacheev/cleanenv"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -31,7 +38,6 @@ const (
 
 const (
     configPath = "config.yml"
-    distributedStorageServers = 2
 )
 
 var cfg internal.Config
@@ -66,21 +72,36 @@ func initLogger(cfg internal.LoggerConfig) {
 }
 
 func main() {
+    ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+    defer stop()
+
     connStr := fmt.Sprintf("host=%v port=%v dbname=%v user=%v", cfg.MetaDB.Host, cfg.MetaDB.Port, cfg.MetaDB.DB, cfg.MetaDB.User)
-    pgPool, err := pgxpool.New(context.Background(), connStr)
+    pgPool, err := pgxpool.New(ctx, connStr)
 	if err != nil {
         lg.Fatalf("unable to connect to database: %v", err.Error())
 	}
 	defer pgPool.Close()
 
-    metadb := pg.NewPg(pgPool)
+    metadb := pgProv.NewPg(pgPool)
+
+    workerTasks := make(chan worker.Task)
+    orphanerTasks := make(chan orphaner.Task)
 
     app = internal.NewApp(
         lg,
         metadb,
-        picker.NewN(metadb, cfg.App.DistributedStorageServers),
-        loader.NewStorageLoader(lg),
+        pickerProv.NewN(metadb, cfg.App.DistributedStorageServers),
+        loaderProv.NewWorkerLoader(lg, *cfg.Loader, storage.NewClient(), workerTasks),
+        orphanerTasks,
     )
+
+    workerCtx := context.Background()
+    worker := workerProv.NewStorageWorker(workerCtx, lg, storage.NewClient())
+    go worker.Run(workerTasks)
+
+    orphanerCtx := context.Background()
+    orphaner := orphanerProv.NewStorageOrphaner(orphanerCtx, lg, storage.NewClient())
+    go orphaner.Run(orphanerTasks)
 
     r := http.NewServeMux()
     r.HandleFunc("/upload", uploadFile)
@@ -91,9 +112,6 @@ func main() {
         Handler: r,
     }
 
-    ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-    defer stop()
-
     go func() {
         if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
             lg.Fatalf("listen and serve: %v", err)
@@ -101,9 +119,16 @@ func main() {
     }()
 
     <-ctx.Done()
-    if err := srv.Shutdown(context.TODO()); err != nil {
-        lg.Printf("server shutdown: %v", err)
+
+    shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10 * time.Second)
+    defer shutdownCancel()
+
+    if err := srv.Shutdown(shutdownCtx); err != nil {
+        lg.Errorf("server shutdown: %v", err)
     }
+
+    worker.Shutdown(workerCtx)
+    orphaner.Shutdown(orphanerCtx)
 }
 
 func writeError(w http.ResponseWriter, wErr string) {
@@ -114,27 +139,72 @@ func writeError(w http.ResponseWriter, wErr string) {
 }
 
 func uploadFile(w http.ResponseWriter, r *http.Request) {
-    r.ParseMultipartForm(cfg.Server.MaxMemoryUploadFileInBytes)
+    r.Body = http.MaxBytesReader(w, r.Body, cfg.Server.UploadMaxFileSizeInBytes)
 
-    file, header, err := r.FormFile("input")
-    if err != nil {
-        lg.Errorf("input form file: %v", err)
-        writeError(w, errInvalidFileInput)
-        return
-    }
-    defer file.Close()
-
-    if header.Size > cfg.Server.MaxFileSizeInBytes {
-        lg.Warningf("file size: %v", header.Size)
-        writeError(w, errMaxFileSizeExceeded)
-        return
-    }
-
-    id, err := app.Upload(header.Filename, file)
-    if err != nil {
-        lg.Errorf("upload file: %v", err)
+	multipartReader, err := r.MultipartReader()
+	if err != nil {
+        lg.Errorf("multipart reader: %v", err)
         writeError(w, errToUploadFile)
-        return
+		return
+	}
+
+    ctx := r.Context()
+
+    processed := map[string]struct{}{}
+    metadata := &internal.FileMetadata{}
+    var id uuid.UUID
+    for part, partErr := multipartReader.NextPart(); partErr == nil; part, partErr = multipartReader.NextPart() {
+        formName := part.FormName()
+        if _, ok := processed[formName]; ok {
+            lg.Warnf("%q already processed", formName)
+            break
+        }
+        processed[formName] = struct{}{}
+
+        switch formName {
+        case "metadata":
+            buf := make([]byte, cfg.Server.UploadMaxMetadataInBytes)
+            nRead := 0
+            for {
+                n, err := part.Read(buf[nRead:])
+                nRead += n
+                if err != nil || n == 0 {
+                    if err == io.EOF {
+                        break
+                    }
+
+                    lg.Errorf("metadata read: %v", err)
+                    writeError(w, errToUploadFile)
+                    return
+                }
+            }
+
+            buf = buf[:nRead]
+
+            if err := json.Unmarshal(buf, metadata); err != nil {
+                lg.Errorf("metadata unmarshal: %v %v", err, string(buf))
+                writeError(w, errToUploadFile)
+                return
+            }
+            
+        case "input":
+            if metadata.Name == "" || metadata.Size < 0 {
+                lg.Errorf("empty input parameters")
+                writeError(w, errToUploadFile)
+                return
+            }
+        
+            id, err = app.Upload(ctx, *metadata, part)
+            if err != nil {
+                lg.Errorf("upload file: %v", err)
+                writeError(w, errToUploadFile)
+                return
+            }
+            err = part.Close()
+            if err != nil {
+                lg.Errorf("filepart close: %v", err)
+            }
+        }
     }
 
     if _, err := w.Write([]byte(id.String())); err != nil {
@@ -153,7 +223,9 @@ func downloadFile(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    if err = app.Download(uuid, w); err != nil {
+    ctx := r.Context()
+
+    if err = app.Download(ctx, uuid, w); err != nil {
         lg.Errorf("download file: %v", err)
         writeError(w, errToDownloadFile)
         return

@@ -9,7 +9,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"golang.org/x/xerrors"
 )
 
 const (
@@ -115,22 +114,17 @@ func (pg *Pg) CreateFile(ctx context.Context, tx metadb.Tx, id uuid.UUID, filena
 	return nil
 }
 
-func (pg *Pg) CreateFileParts(ctx context.Context, tx metadb.Tx, id uuid.UUID, serverIDs []int, partSizes map[int]int64) error {
-	if len(serverIDs) == 0 {
+func (pg *Pg) CreateFileParts(ctx context.Context, tx metadb.Tx, id uuid.UUID, partSizes map[metadb.PartSizeKey]int64) error {
+	if len(partSizes) == 0 {
 		return nil
 	}
 
 	batches := &pgx.Batch{}
-	for i, serverID := range serverIDs {
-		partSize, ok := partSizes[serverID]
-		if !ok {
-			return xerrors.Errorf("create file part for server_id: %v", serverID)
-		}
-
+	for serverKey, partSize := range partSizes {
 		batches.Queue(sqlCreateFileParts, pgx.NamedArgs{
 			"file_id": id.String(),
-			"server_id": serverID,
-			"part_num": i,
+			"server_id": serverKey.ServerID,
+			"part_num": serverKey.Order,
 			"part_size": partSize,
 		})
 	}
@@ -138,7 +132,7 @@ func (pg *Pg) CreateFileParts(ctx context.Context, tx metadb.Tx, id uuid.UUID, s
 	results := pg.conn(tx).SendBatch(ctx, batches)
 	defer results.Close()
 
-    for range serverIDs {
+    for range partSizes {
 		if _, err := results.Exec(); err != nil {
 			return err
 		}

@@ -11,7 +11,25 @@ type FilePartServer struct {
 	PartSize int
 }
 
-func ServerToServerIDs(servers []Server) []int {
+func ServersToServerIDs(servers []Server) []int {
+	serverIDs := make([]int, len(servers))
+	for i, server := range servers {
+		serverIDs[i] = server.ID
+	}
+
+	return serverIDs
+}
+
+func ServersToHosts(servers []Server) []string {
+	serverHosts := make([]string, len(servers))
+	for i, server := range servers {
+		serverHosts[i] = server.Host
+	}
+
+	return serverHosts
+}
+
+func FilePartServersToServerIDs(servers []FilePartServer) []int {
 	serverIDs := make([]int, len(servers))
 	for i, server := range servers {
 		serverIDs[i] = server.ID

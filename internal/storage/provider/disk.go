@@ -42,3 +42,12 @@ func (d *Disk) Read(id uuid.UUID) (io.ReadCloser, error) {
 
 	return f, nil
 }
+
+func (d *Disk) Delete(id uuid.UUID) error {
+	err := os.Remove(id.String())
+	if err != nil {
+		return xerrors.Errorf("remove file: %v", err)
+	}
+
+	return nil
+}

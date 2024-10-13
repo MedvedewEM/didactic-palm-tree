@@ -1,7 +1,7 @@
 app:
   distributed_storage_servers: 2
 logger:
-  level: 6
+  level: 5
   output: stdout
 metadb:
   host: metadb
@@ -10,5 +10,8 @@ metadb:
   user: root
 server:
   port: 8080
-  max_file_size_in_bytes: 10_000_000_000
-  max_memory_upload_file_in_bytes: 100_000_000
+  upload_max_file_size_in_bytes: 10_000_000_000
+  upload_max_metadata_in_bytes: 1_000
+loader:
+  upload_file_max_buffer_in_bytes: 10_000
+  upload_large_file_max_buffer_in_bytes: 10_000_000
